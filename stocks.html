@@ -87,7 +87,7 @@
 
 <script>
 (function () {
-  var DEFAULTS = ["NVDA","SPCX","ANT","DUOL","BNG","ADM"];
+  var DEFAULTS = ["NVDA","SPCX","ANT","DUOL","BG","ADM"];
   var store = {
     get: function (k, d) { try { var v = localStorage.getItem(k); return v === null ? d : v; } catch (e) { return d; } },
     set: function (k, v) { try { localStorage.setItem(k, v); } catch (e) {} },
@@ -95,7 +95,7 @@
   };
 
   var symbols = DEFAULTS.slice();
-  try { var saved = JSON.parse(store.get("watch2", "null")); if (Array.isArray(saved) && saved.length) symbols = saved; } catch (e) {}
+  try { var saved = JSON.parse(store.get("watch3", "null")); if (Array.isArray(saved) && saved.length) symbols = saved; } catch (e) {}
   var apiKey = store.get("finnhubKey", "");
   var quotes = {};   // symbol -> {c,d,dp,h,l,pc} | {error}
   var demoSeed = {}; // symbol -> base price for demo mode
@@ -104,7 +104,7 @@
   var fmt = function (n) { return n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }); };
   var esc = function (s) { return String(s).replace(/[&<>"']/g, function (c) { return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]; }); };
 
-  function persist() { store.set("watch2", JSON.stringify(symbols)); }
+  function persist() { store.set("watch3", JSON.stringify(symbols)); }
 
   function demoQuote(sym) {
     if (!demoSeed[sym]) {
