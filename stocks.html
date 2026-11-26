@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stock Watchlist</title>
+<style>
+  :root {
+    --bg:#0f1318; --panel:#171d25; --line:#263040; --text:#e6ebf2; --muted:#8a97a8;
+    --up:#2ecc8f; --down:#ff6b6b; --accent:#5aa9ff;
+  }
+  @media (prefers-color-scheme: light) {
+    :root { --bg:#f5f7fa; --panel:#fff; --line:#dde3ec; --text:#18202b; --muted:#667386; --up:#0f9d63; --down:#d93a3a; --accent:#1769d1; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:15px/1.4 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
+  main { max-width:880px; margin:0 auto; padding:24px 16px 48px; }
+  header { display:flex; flex-wrap:wrap; align-items:baseline; justify-content:space-between; gap:8px; margin-bottom:16px; }
+  h1 { font-size:22px; margin:0; }
+  #status { color:var(--muted); font-size:13px; }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:14px; margin-bottom:14px; }
+  .row { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+  input { background:var(--bg); color:var(--text); border:1px solid var(--line); border-radius:8px; padding:9px 11px; font:inherit; min-width:0; }
+  input:focus { outline:2px solid var(--accent); outline-offset:-1px; }
+  #sym { width:130px; text-transform:uppercase; }
+  #key { flex:1 1 240px; }
+  button { background:var(--accent); color:#fff; border:0; border-radius:8px; padding:9px 14px; font:inherit; cursor:pointer; }
+  button.ghost { background:transparent; color:var(--muted); border:1px solid var(--line); }
+  button.x { background:none; color:var(--muted); padding:4px 8px; font-size:18px; line-height:1; }
+  button.x:hover { color:var(--down); }
+  .note { color:var(--muted); font-size:13px; margin:8px 0 0; }
+  .note a { color:var(--accent); }
+  table { width:100%; border-collapse:collapse; }
+  th, td { padding:11px 8px; text-align:right; border-bottom:1px solid var(--line); white-space:nowrap; }
+  th { color:var(--muted); font-weight:500; font-size:12px; text-transform:uppercase; letter-spacing:.04em; }
+  th:first-child, td:first-child { text-align:left; }
+  tr:last-child td { border-bottom:0; }
+  .sym { font-weight:600; }
+  .up { color:var(--up); } .down { color:var(--down); }
+  .range { width:110px; }
+  .bar { position:relative; height:6px; background:var(--line); border-radius:3px; }
+  .bar i { position:absolute; top:-3px; width:3px; height:12px; background:var(--text); border-radius:2px; transform:translateX(-1px); }
+  .rl { display:flex; justify-content:space-between; color:var(--muted); font-size:11px; margin-top:3px; }
+  .empty { text-align:center; color:var(--muted); padding:28px 8px; }
+  @media (max-width:640px) { .hide-sm { display:none; } th,td { padding:10px 5px; } }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Stock Watchlist</h1>
+    <span id="status">Demo data</span>
+  </header>
+
+  <div class="panel">
+    <div class="row">
+      <input id="key" type="password" placeholder="Finnhub API key (free) for live quotes" autocomplete="off" spellcheck="false">
+      <button id="saveKey">Save key</button>
+      <button id="clearKey" class="ghost">Use demo data</button>
+    </div>
+    <p class="note">Free key at <a href="https://finnhub.io/register" target="_blank" rel="noopener">finnhub.io</a>. It stays in this browser only (localStorage) and is sent only to finnhub.io. Without a key, the page shows simulated prices so you can see the layout.</p>
+  </div>
+
+  <div class="panel">
+    <form id="add" class="row">
+      <input id="sym" placeholder="Ticker" maxlength="10" aria-label="Ticker symbol">
+      <button type="submit">Add</button>
+      <button type="button" id="refresh" class="ghost">Refresh</button>
+    </form>
+  </div>
+
+  <div id="demoWarn" class="panel" style="border-color:var(--down);color:var(--down);display:none">
+    Demo mode: these prices are made up and do not match the market. Add a Finnhub key above for real quotes.
+  </div>
+
+  <div class="panel" style="padding:4px 10px">
+    <table>
+      <thead><tr>
+        <th>Symbol</th><th>Price</th><th>Change</th><th>%</th>
+        <th class="hide-sm">Prev close</th><th class="hide-sm">Day range</th><th></th>
+      </tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </div>
+  <p class="note">Quotes are for information only and may be delayed. Not investment advice. Refreshes every 60 seconds.</p>
+</main>
+
+<script>
+(function () {
+  var DEFAULTS = ["NVDA","SPCX","ANT","DUOL","BNG","ADM"];
+  var store = {
+    get: function (k, d) { try { var v = localStorage.getItem(k); return v === null ? d : v; } catch (e) { return d; } },
+    set: function (k, v) { try { localStorage.setItem(k, v); } catch (e) {} },
+    del: function (k) { try { localStorage.removeItem(k); } catch (e) {} }
+  };
+
+  var symbols = DEFAULTS.slice();
+  try { var saved = JSON.parse(store.get("watch2", "null")); if (Array.isArray(saved) && saved.length) symbols = saved; } catch (e) {}
+  var apiKey = store.get("finnhubKey", "");
+  var quotes = {};   // symbol -> {c,d,dp,h,l,pc} | {error}
+  var demoSeed = {}; // symbol -> base price for demo mode
+
+  var $ = function (id) { return document.getElementById(id); };
+  var fmt = function (n) { return n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }); };
+  var esc = function (s) { return String(s).replace(/[&<>"']/g, function (c) { return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]; }); };
+
+  function persist() { store.set("watch2", JSON.stringify(symbols)); }
+
+  function demoQuote(sym) {
+    if (!demoSeed[sym]) {
+      var h = 0; for (var i = 0; i < sym.length; i++) h = (h * 31 + sym.charCodeAt(i)) % 9973;
+      demoSeed[sym] = 30 + (h % 470);
+    }
+    var pc = demoSeed[sym];
+    var c = pc * (1 + (Math.random() - 0.5) * 0.04);
+    return { c: c, d: c - pc, dp: (c - pc) / pc * 100, h: Math.max(c, pc) * 1.005, l: Math.min(c, pc) * 0.995, pc: pc };
+  }
+
+  function liveQuote(sym) {
+    return fetch("https://finnhub.io/api/v1/quote?symbol=" + encodeURIComponent(sym) + "&token=" + encodeURIComponent(apiKey))
+      .then(function (r) {
+        if (r.status === 401 || r.status === 403) throw new Error("Bad API key");
+        if (r.status === 429) throw new Error("Rate limited");
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        return r.json();
+      })
+      .then(function (q) {
+        if (!q || !q.c) return { error: "Unknown symbol" };
+        return q;
+      });
+  }
+
+  function load() {
+    $("status").textContent = "Updating…";
+    var jobs = symbols.map(function (s) {
+      var p = apiKey ? liveQuote(s) : Promise.resolve(demoQuote(s));
+      return p.then(function (q) { quotes[s] = q; }, function (e) { quotes[s] = { error: e.message || "Failed" }; });
+    });
+    Promise.all(jobs).then(function () {
+      render();
+      var t = new Date().toLocaleTimeString();
+      $("status").textContent = (apiKey ? "Live · " : "Demo data · ") + "updated " + t;
+    });
+  }
+
+  function render() {
+    $("demoWarn").style.display = apiKey ? "none" : "block";
+    var body = $("rows");
+    if (!symbols.length) { body.innerHTML = '<tr><td colspan="7" class="empty">Add a ticker above to start tracking.</td></tr>'; return; }
+    body.innerHTML = symbols.map(function (s) {
+      var q = quotes[s];
+      var x = '<td><button class="x" data-rm="' + esc(s) + '" aria-label="Remove ' + esc(s) + '">×</button></td>';
+      if (!q) return '<tr><td class="sym">' + esc(s) + '</td><td colspan="5" style="color:var(--muted)">Loading…</td>' + x + '</tr>';
+      if (q.error) return '<tr><td class="sym">' + esc(s) + '</td><td colspan="5" class="down">' + esc(q.error) + '</td>' + x + '</tr>';
+      var cls = q.d >= 0 ? "up" : "down", sign = q.d >= 0 ? "+" : "";
+      var span = q.h - q.l, pos = span > 0 ? Math.min(100, Math.max(0, (q.c - q.l) / span * 100)) : 50;
+      return '<tr>' +
+        '<td class="sym">' + esc(s) + '</td>' +
+        '<td>$' + fmt(q.c) + '</td>' +
+        '<td class="' + cls + '">' + sign + fmt(q.d) + '</td>' +
+        '<td class="' + cls + '">' + sign + fmt(q.dp) + '%</td>' +
+        '<td class="hide-sm">$' + fmt(q.pc) + '</td>' +
+        '<td class="hide-sm range"><div class="bar"><i style="left:' + pos + '%"></i></div>' +
+          '<div class="rl"><span>' + fmt(q.l) + '</span><span>' + fmt(q.h) + '</span></div></td>' + x + '</tr>';
+    }).join("");
+  }
+
+  $("add").addEventListener("submit", function (e) {
+    e.preventDefault();
+    var s = $("sym").value.trim().toUpperCase().replace(/[^A-Z0-9.\-]/g, "");
+    $("sym").value = "";
+    if (!s || symbols.indexOf(s) !== -1) return;
+    symbols.push(s); persist(); load();
+  });
+
+  $("rows").addEventListener("click", function (e) {
+    var s = e.target.getAttribute && e.target.getAttribute("data-rm");
+    if (!s) return;
+    symbols = symbols.filter(function (x) { return x !== s; });
+    delete quotes[s]; persist(); render();
+  });
+
+  $("refresh").addEventListener("click", load);
+  $("saveKey").addEventListener("click", function () {
+    var k = $("key").value.trim();
+    if (!k) return;
+    apiKey = k; store.set("finnhubKey", k); $("key").value = ""; load();
+  });
+  $("clearKey").addEventListener("click", function () { apiKey = ""; store.del("finnhubKey"); quotes = {}; load(); });
+
+  render(); load();
+  setInterval(load, 60000);
+})();
+</script>
+</body>
+</html>
