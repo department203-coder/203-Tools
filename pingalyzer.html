@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pingalyzer</title>
+<style>
+  :root{
+    --bg:#fafaf9; --surface:#ffffff; --ink:#1c1c1a; --muted:#6b6b66; --grid:#e8e8e4; --border:#dcdcd6; --bad:#c62828;
+    --c0:#2a6fdb; --c1:#d9622b; --c2:#1a9a7a;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{ --bg:#141416; --surface:#1d1d20; --ink:#ececea; --muted:#9a9a94; --grid:#2d2d31; --border:#35353a; --bad:#ef5350;
+      --c0:#6aa3ff; --c1:#f0914f; --c2:#3cc9a4; }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.4 system-ui,-apple-system,Segoe UI,sans-serif}
+  main{max-width:960px;margin:0 auto;padding:24px 16px 40px}
+  header{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;flex-wrap:wrap;margin-bottom:16px}
+  h1{font-size:22px;margin:0}
+  .sub{color:var(--muted);font-size:13px}
+  .btns button{font:inherit;font-size:13px;padding:6px 12px;border:1px solid var(--border);background:var(--surface);color:var(--ink);border-radius:6px;cursor:pointer;margin-left:6px}
+  .btns button:hover{border-color:var(--muted)}
+  .hero{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:12px}
+  .card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:12px 14px;flex:1 1 200px;min-width:0}
+  .card .name{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--muted)}
+  .dot{width:10px;height:10px;border-radius:50%;flex:none}
+  .card .now{font-size:28px;font-weight:600;font-variant-numeric:tabular-nums;margin:2px 0}
+  .card .now small{font-size:14px;font-weight:400;color:var(--muted)}
+  .stats{display:flex;gap:14px;font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums;flex-wrap:wrap}
+  .stats b{color:var(--ink);font-weight:600}
+  .max{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:12px 14px;margin-bottom:12px;display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}
+  .max .big{font-size:34px;font-weight:700;font-variant-numeric:tabular-nums}
+  .max .big small{font-size:16px;font-weight:400;color:var(--muted)}
+  .chartwrap{position:relative;background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:12px}
+  .legend{display:flex;gap:16px;font-size:13px;margin-bottom:6px;flex-wrap:wrap}
+  .legend span{display:flex;align-items:center;gap:6px}
+  .legend i{width:14px;height:3px;border-radius:2px;display:inline-block}
+  canvas{width:100%;height:340px;display:block}
+  #tip{position:absolute;pointer-events:none;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:8px 10px;font-size:12px;box-shadow:0 4px 14px rgba(0,0,0,.15);display:none;white-space:nowrap;font-variant-numeric:tabular-nums}
+  #tip .t{color:var(--muted);margin-bottom:4px}
+  #tip div.r{display:flex;align-items:center;gap:6px}
+  .note{color:var(--muted);font-size:12px;margin-top:12px}
+  .err{color:var(--bad)}
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <h1>Pingalyzer</h1>
+      <div class="sub" id="status">Starting…</div>
+    </div>
+    <div class="btns">
+      <button id="pause">Pause</button>
+      <button id="reset">Reset session</button>
+    </div>
+  </header>
+
+  <div class="max">
+    <div class="sub">Session max latency</div>
+    <div class="big" id="maxVal">–<small> ms</small></div>
+    <div class="sub" id="maxWho"></div>
+  </div>
+
+  <div class="hero" id="cards"></div>
+
+  <div class="chartwrap" id="wrap">
+    <div class="legend" id="legend"></div>
+    <canvas id="cv"></canvas>
+    <div id="tip"></div>
+  </div>
+
+  <p class="note">
+    Browsers can't send ICMP pings, so each sample is the time for a tiny HTTPS request to get its first response
+    back (about one network round trip plus server time). Expect numbers a bit above a terminal <code>ping</code>.
+    A red tick on the baseline marks a timeout (&gt;<span id="to"></span> ms) or failed request.
+  </p>
+</main>
+
+<script>
+(() => {
+  // ---- Config: edit these ----
+  const WINDOW_MS   = 30000;   // chart window
+  const INTERVAL_MS = 1000;    // sample rate per target
+  const TIMEOUT_MS  = 3000;
+  const TARGETS = [
+    { name: 'Google',     url: 'https://www.google.com/generate_204' },
+    { name: 'Cloudflare', url: 'https://1.1.1.1/cdn-cgi/trace' },
+    { name: 'Bing',       url: 'https://www.bing.com/favicon.ico' },
+  ];
+  // ----------------------------
+
+  const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+  const $ = id => document.getElementById(id);
+  document.getElementById('to').textContent = TIMEOUT_MS;
+
+  const state = TARGETS.map((t, i) => ({ ...t, color: `--c${i}`, samples: [], sent: 0, lost: 0, sum: 0, ok: 0, max: null, maxAt: null, last: null }));
+  let sessionMax = null, sessionMaxWho = '', paused = false, sessionStart = Date.now();
+
+  // cards + legend
+  state.forEach((s, i) => {
+    const c = document.createElement('div'); c.className = 'card';
+    c.innerHTML = `<div class="name"><span class="dot" style="background:var(${s.color})"></span>${s.name}</div>
+      <div class="now" id="now${i}">–<small> ms</small></div>
+      <div class="stats"><span>avg <b id="avg${i}">–</b></span><span>max <b id="max${i}">–</b></span><span>loss <b id="loss${i}">0%</b></span></div>`;
+    $('cards').appendChild(c);
+    const l = document.createElement('span');
+    l.innerHTML = `<i style="background:var(${s.color})"></i>${s.name}`;
+    $('legend').appendChild(l);
+  });
+
+  let lastErr = '';
+  async function probe(url) {
+    const ctl = new AbortController();
+    const to = setTimeout(() => ctl.abort(), TIMEOUT_MS);
+    const u = url + (url.includes('?') ? '&' : '?') + '_=' + Math.random().toString(36).slice(2);
+    const t0 = performance.now();
+    try {
+      await fetch(u, { mode: 'no-cors', cache: 'no-store', signal: ctl.signal, credentials: 'omit', referrerPolicy: 'no-referrer' });
+      return performance.now() - t0;
+    } catch (e) { lastErr = (e && e.name === 'AbortError') ? 'timed out after ' + TIMEOUT_MS + ' ms' : (e && e.message) || String(e); return null; }
+    finally { clearTimeout(to); }
+  }
+
+  function record(s, ms) {
+    const t = Date.now();
+    s.samples.push({ t, ms });
+    s.sent++;
+    if (ms == null) { s.lost++; s.last = null; }
+    else {
+      s.ok++; s.sum += ms; s.last = ms;
+      if (s.max == null || ms > s.max) { s.max = ms; s.maxAt = t; }
+      if (sessionMax == null || ms > sessionMax) { sessionMax = ms; sessionMaxWho = s.name; sessionMaxAt = t; }
+    }
+    // keep a little more than the window
+    const cut = t - WINDOW_MS - 5000;
+    while (s.samples.length && s.samples[0].t < cut) s.samples.shift();
+  }
+  let sessionMaxAt = null;
+
+  const fmt = v => v == null ? '–' : (v < 10 ? v.toFixed(1) : Math.round(v)) + ' ms';
+  const num = v => v == null ? '–' : (v < 10 ? v.toFixed(1) : String(Math.round(v)));
+
+  function updateText() {
+    state.forEach((s, i) => {
+      $('now' + i).innerHTML = s.sent && s.last == null ? '<span class="err">timeout</span>' : `${num(s.last)}<small> ms</small>`;
+      $('avg' + i).textContent = s.ok ? fmt(s.sum / s.ok) : '–';
+      $('max' + i).textContent = fmt(s.max);
+      $('loss' + i).textContent = s.sent ? Math.round(100 * s.lost / s.sent) + '%' : '0%';
+    });
+    $('maxVal').innerHTML = `${num(sessionMax)}<small> ms</small>`;
+    $('maxWho').textContent = sessionMax == null ? '' : `${sessionMaxWho} at ${new Date(sessionMaxAt).toLocaleTimeString()}`;
+    const total = state.reduce((a, s) => a + s.sent, 0), lost = state.reduce((a, s) => a + s.lost, 0);
+    $('status').innerHTML = paused ? 'Paused' :
+      (total && lost === total ? '<span class="err">All requests failing (' + lastErr + '). If you are viewing this inside an app preview, open the file in a regular browser tab instead</span>'
+       : `Sampling every ${INTERVAL_MS / 1000}s · session ${Math.round((Date.now() - sessionStart) / 1000)}s`);
+  }
+
+  function loop(s, i) {
+    const tick = async () => {
+      if (!paused) {
+        const ms = await probe(s.url);
+        if (!paused) record(s, ms);
+      }
+      setTimeout(tick, INTERVAL_MS);
+    };
+    // warm-up (not recorded) so the first sample doesn't include TLS setup; staggered
+    setTimeout(async () => { await probe(s.url); tick(); }, i * (INTERVAL_MS / state.length));
+  }
+  state.forEach(loop);
+  setInterval(updateText, 500);
+
+  // ---- chart ----
+  const cv = $('cv'), ctx = cv.getContext('2d');
+  let W = 0, H = 0, dpr = 1, hoverX = null;
+  const pad = { l: 46, r: 12, t: 8, b: 26 };
+  function resize() {
+    dpr = window.devicePixelRatio || 1;
+    const r = cv.getBoundingClientRect();
+    W = r.width; H = r.height;
+    cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+  window.addEventListener('resize', resize); resize();
+
+  function niceMax(v) {
+    const steps = [25, 50, 100, 150, 200, 300, 500, 1000, 2000, 3000];
+    for (const s of steps) if (v <= s) return s;
+    return Math.ceil(v / 1000) * 1000;
+  }
+
+  let frozenNow = null;
+  function draw() {
+    const now = paused && frozenNow ? frozenNow : Date.now();
+    const t0 = now - WINDOW_MS;
+    ctx.clearRect(0, 0, W, H);
+    const pw = W - pad.l - pad.r, ph = H - pad.t - pad.b;
+    let vmax = 0;
+    state.forEach(s => s.samples.forEach(p => { if (p.t >= t0 && p.ms != null && p.ms > vmax) vmax = p.ms; }));
+    const ymax = niceMax(Math.max(vmax * 1.1, 25));
+    const X = t => pad.l + (t - t0) / WINDOW_MS * pw;
+    const Y = v => pad.t + ph - v / ymax * ph;
+
+    ctx.font = '11px system-ui, sans-serif';
+    ctx.textBaseline = 'middle';
+    // grid + y labels
+    ctx.lineWidth = 1;
+    for (let i = 0; i <= 4; i++) {
+      const v = ymax * i / 4, y = Math.round(Y(v)) + .5;
+      ctx.strokeStyle = css('--grid'); ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(W - pad.r, y); ctx.stroke();
+      ctx.fillStyle = css('--muted'); ctx.textAlign = 'right'; ctx.fillText(Math.round(v) + ' ms', pad.l - 6, y);
+    }
+    // x labels
+    ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+    for (let s = 0; s <= 30; s += 5) {
+      const x = X(now - s * 1000);
+      ctx.fillStyle = css('--muted'); ctx.fillText(s === 0 ? 'now' : '-' + s + 's', x, H - pad.b + 8);
+    }
+
+    // clip lines to plot area
+    ctx.save();
+    ctx.beginPath(); ctx.rect(pad.l, 0, pw + pad.r, H); ctx.clip();
+
+    // session max reference line (if within y-range)
+    state.forEach((s) => {
+      ctx.strokeStyle = css(s.color); ctx.fillStyle = css(s.color);
+      ctx.lineWidth = 2; ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+      let open = false; ctx.beginPath();
+      const pts = s.samples.filter(p => p.t >= t0 - INTERVAL_MS * 2);
+      pts.forEach(p => {
+        if (p.ms == null) { open = false; return; }
+        const x = X(p.t), y = Y(Math.min(p.ms, ymax));
+        if (!open) { ctx.moveTo(x, y); open = true; } else ctx.lineTo(x, y);
+      });
+      ctx.stroke();
+      // markers on last point
+      const last = pts[pts.length - 1];
+      if (last && last.ms != null) {
+        ctx.beginPath(); ctx.arc(X(last.t), Y(last.ms), 4, 0, 7); ctx.fill();
+        ctx.lineWidth = 2; ctx.strokeStyle = css('--surface'); ctx.stroke();
+      }
+      // loss ticks
+      ctx.strokeStyle = css('--bad'); ctx.lineWidth = 2;
+      pts.forEach(p => { if (p.ms == null) { const x = X(p.t); ctx.beginPath(); ctx.moveTo(x, pad.t + ph - 10); ctx.lineTo(x, pad.t + ph); ctx.stroke(); } });
+    });
+    ctx.restore();
+
+    // hover crosshair
+    if (hoverX != null && hoverX >= pad.l && hoverX <= W - pad.r) {
+      const th = t0 + (hoverX - pad.l) / pw * WINDOW_MS;
+      ctx.strokeStyle = css('--muted'); ctx.lineWidth = 1; ctx.setLineDash([3, 3]);
+      ctx.beginPath(); ctx.moveTo(Math.round(hoverX) + .5, pad.t); ctx.lineTo(Math.round(hoverX) + .5, pad.t + ph); ctx.stroke(); ctx.setLineDash([]);
+      const rows = state.map(s => {
+        let best = null;
+        s.samples.forEach(p => { if (!best || Math.abs(p.t - th) < Math.abs(best.t - th)) best = p; });
+        if (best && Math.abs(best.t - th) > INTERVAL_MS * 1.2) best = null;
+        if (best && best.ms != null) { ctx.fillStyle = css(s.color); ctx.beginPath(); ctx.arc(X(best.t), Y(best.ms), 4, 0, 7); ctx.fill(); }
+        return `<div class="r"><span class="dot" style="background:var(${s.color})"></span>${s.name}: <b>${best ? (best.ms == null ? 'timeout' : fmt(best.ms)) : '–'}</b></div>`;
+      });
+      const tip = $('tip');
+      tip.innerHTML = `<div class="t">${((now - th) / 1000).toFixed(1)}s ago</div>` + rows.join('');
+      tip.style.display = 'block';
+      const left = Math.min(hoverX + 24, $('wrap').clientWidth - tip.offsetWidth - 8);
+      tip.style.left = left + 'px'; tip.style.top = '56px';
+    } else $('tip').style.display = 'none';
+
+    requestAnimationFrame(draw);
+  }
+  requestAnimationFrame(draw);
+
+  cv.addEventListener('mousemove', e => { hoverX = e.clientX - cv.getBoundingClientRect().left; });
+  cv.addEventListener('mouseleave', () => { hoverX = null; });
+  cv.addEventListener('touchmove', e => { hoverX = e.touches[0].clientX - cv.getBoundingClientRect().left; }, { passive: true });
+  cv.addEventListener('touchend', () => { hoverX = null; });
+
+  $('pause').onclick = e => {
+    paused = !paused; frozenNow = paused ? Date.now() : null;
+    e.target.textContent = paused ? 'Resume' : 'Pause'; updateText();
+  };
+  $('reset').onclick = () => {
+    state.forEach(s => Object.assign(s, { samples: [], sent: 0, lost: 0, sum: 0, ok: 0, max: null, maxAt: null, last: null }));
+    sessionMax = null; sessionMaxWho = ''; sessionStart = Date.now(); updateText();
+  };
+  updateText();
+})();
+</script>
+</body>
+</html>
